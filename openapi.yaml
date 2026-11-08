@@ -1,0 +1,697 @@
+openapi: 3.1.0
+info:
+  title: King's Gambit Mailbox API
+  version: 1.0.0
+  summary: Mailbox storage for King's Gambit: Rise to Power.
+  description: |
+    Stores player mail and read/claim state. The Unity game grants currency and piece rewards.
+    Setting state to `claim` does not change inventory. All `/api/v1` routes use one shared bearer token.
+    That token is not per-player authentication. The admin dashboard uses a Google session and is not part of this bearer API.
+servers:
+  - url: https://mailbox.example.com
+    description: Replace with PUBLIC_BASE_URL
+tags:
+  - name: Health
+  - name: Messages
+  - name: Broadcasts
+security:
+  - mailboxBearer: []
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: health
+      security: []
+      summary: Process health
+      description: Does not call Unity Gaming Services.
+      responses:
+        "200":
+          description: Process is serving HTTP.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                status: healthy
+  /api/v1/players/{playerId}/messages:
+    parameters:
+      - $ref: "#/components/parameters/PlayerId"
+    get:
+      tags: [Messages]
+      operationId: listMessages
+      summary: List a player's messages
+      description: Returns every stored message, newest `createdAt` first, then message id ascending. Does not mark messages read.
+      responses:
+        "200":
+          description: Mailbox. An existing player with no mail has total 0.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageList"
+              example:
+                playerId: player_123
+                total: 1
+                messages:
+                  - schemaVersion: 1
+                    id: 550e8400-e29b-41d4-a716-446655440000
+                    sender:
+                      type: system
+                      id: null
+                      displayName: King's Gambit
+                    recipientId: player_123
+                    category: general
+                    subject: Welcome!
+                    body: Welcome to the game.
+                    state: unread
+                    createdAt: "2026-11-08T12:00:00Z"
+                    readAt: null
+                    claimedAt: null
+                    expiresAt: null
+                    attachments: []
+                    metadata: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The player does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: PLAYER_NOT_FOUND
+                  message: The player does not exist.
+                  requestId: 550e8400-e29b-41d4-a716-446655440000
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+    post:
+      tags: [Messages]
+      operationId: sendMessage
+      summary: Send a message to one player
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageInput"
+            example:
+              sender:
+                type: system
+                id: null
+                displayName: King's Gambit
+              category: reward
+              subject: Welcome!
+              body: Welcome to King's Gambit: Rise to Power!
+              expiresAt: null
+              attachments:
+                - type: currency
+                  id: diamonds
+                  amount: 100
+                - type: piece
+                  id: pawn_3
+                  amount: 8
+              metadata:
+                source: welcome_gift
+      responses:
+        "201":
+          description: Message stored. Location is the canonical message URL.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "200":
+          description: Idempotency-Key replay of a message that was already stored.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Recipient player does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/v1/players/{playerId}/messages/{messageId}/read:
+    put:
+      tags: [Messages]
+      operationId: markRead
+      summary: Mark a message read
+      description: No request body. `unread` becomes `read` and `readAt` is set once. `read` and `claim` are returned unchanged.
+      parameters:
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Current message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/MessageMissing"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/v1/players/{playerId}/messages/{messageId}/claim:
+    put:
+      tags: [Messages]
+      operationId: markClaim
+      summary: Record that the player claimed attachments
+      description: |
+        No request body. Sets `state` to `claim`. Does not grant currency, pieces, or any other reward.
+        Messages without attachments return 409. An existing claim is unchanged.
+      parameters:
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Current message, including an already-claimed message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/MessageMissing"
+        "409":
+          description: No attachments, or a write conflict after retries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                noAttachments:
+                  value:
+                    error:
+                      code: INVALID_STATE_TRANSITION
+                      message: A message without attachments cannot be claimed.
+                      requestId: 550e8400-e29b-41d4-a716-446655440000
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/v1/players/{playerId}/messages/{messageId}:
+    delete:
+      tags: [Messages]
+      operationId: deleteMessage
+      summary: Delete one message
+      description: Deletes only that `mail_` key. Unclaimed attachments return 409. No request body.
+      parameters:
+        - $ref: "#/components/parameters/PlayerId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "204":
+          description: Message deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/MessageMissing"
+        "409":
+          description: Unclaimed attachments or a write conflict.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: UNCLAIMED_ATTACHMENTS
+                  message: Messages with unclaimed attachments cannot be deleted.
+                  requestId: 550e8400-e29b-41d4-a716-446655440000
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /api/v1/messages/broadcast:
+    post:
+      tags: [Broadcasts]
+      operationId: startBroadcast
+      summary: Queue a message for every enabled player
+      description: |
+        Accepts the same JSON as a single send, without a recipient. Returns 202 after the job is stored.
+        Delivery continues afterward. `totalPlayers` is null until the player list has been fully read.
+        The same Idempotency-Key and raw body returns 200 with the current status.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageInput"
+      responses:
+        "202":
+          description: Job stored. Delivery has not necessarily finished.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BroadcastAccepted"
+              example:
+                broadcastId: 550e8400-e29b-41d4-a716-446655440000
+                status: pending
+        "200":
+          description: Replay of an existing broadcast id derived from Idempotency-Key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BroadcastStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/messages/broadcast/{broadcastId}:
+    get:
+      tags: [Broadcasts]
+      operationId: broadcastStatus
+      summary: Read broadcast progress
+      description: |
+        `totalPlayers` is null until the player list is exhausted. Do not treat `processing` as success.
+        A stalled job may advance by one batch while this request is handled.
+      parameters:
+        - name: broadcastId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current durable progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BroadcastStatus"
+              example:
+                broadcastId: 550e8400-e29b-41d4-a716-446655440000
+                status: processing
+                totalPlayers: null
+                processed: 450
+                succeeded: 447
+                failed: 3
+                failure: null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such broadcast.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: BROADCAST_NOT_FOUND
+                  message: The broadcast does not exist.
+                  requestId: 550e8400-e29b-41d4-a716-446655440000
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+components:
+  securitySchemes:
+    mailboxBearer:
+      type: http
+      scheme: bearer
+      description: Shared MAILBOX_API_TOKEN. Not player authentication.
+  parameters:
+    PlayerId:
+      name: playerId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9_-]+$"
+      example: player_123
+    MessageId:
+      name: messageId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+  responses:
+    BadRequest:
+      description: Malformed JSON or an invalid identifier.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INVALID_TOKEN
+              message: Missing or invalid bearer token.
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+    MessageMissing:
+      description: The message does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: MESSAGE_NOT_FOUND
+              message: The requested message does not exist.
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+    Conflict:
+      description: State, idempotency, write-lock, or storage-limit conflict.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TooLarge:
+      description: JSON body exceeds 64 KiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    UnsupportedMedia:
+      description: Content-Type is not application/json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unprocessable:
+      description: JSON failed mailbox validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: Unity rate limit. Retry-After is copied when Unity sends it.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    BadGateway:
+      description: Unity rejected the service account or returned an unusable response. This is not INVALID_TOKEN.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unavailable:
+      description: Unity Gaming Services is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Timeout:
+      description: Unity Gaming Services timed out.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  examples:
+    WelcomeMessage:
+      value:
+        schemaVersion: 1
+        id: 550e8400-e29b-41d4-a716-446655440000
+        sender:
+          type: system
+          id: null
+          displayName: King's Gambit
+        recipientId: player_123
+        category: general
+        subject: Welcome!
+        body: Welcome to the game.
+        state: unread
+        createdAt: "2026-11-08T12:00:00Z"
+        readAt: null
+        claimedAt: null
+        expiresAt: null
+        attachments: []
+        metadata: {}
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: healthy
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorObject"
+    ErrorObject:
+      type: object
+      additionalProperties: false
+      required: [code, message, requestId]
+      properties:
+        code:
+          type: string
+          examples: [MESSAGE_NOT_FOUND]
+        message:
+          type: string
+        requestId:
+          type: string
+          format: uuid
+    Sender:
+      type: object
+      additionalProperties: false
+      required: [type, id, displayName]
+      properties:
+        type:
+          type: string
+          enum: [system, admin, player]
+          description: player is reserved and rejected on send.
+        id:
+          type: ["string", "null"]
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 120
+    Attachment:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, id, amount]
+          properties:
+            type:
+              const: currency
+            id:
+              enum: [coins, diamonds]
+            amount:
+              type: integer
+              minimum: 1
+              maximum: 4294967295
+        - type: object
+          additionalProperties: false
+          required: [type, id, amount]
+          properties:
+            type:
+              const: piece
+            id:
+              type: string
+              description: "<pieceType>_<stars>, stars 1 through 25, no leading zeros."
+              examples: [pawn_3, king_25]
+            amount:
+              type: integer
+              minimum: 1
+              maximum: 4294967295
+    MessageInput:
+      type: object
+      additionalProperties: false
+      required: [sender, category, subject, body]
+      properties:
+        sender:
+          $ref: "#/components/schemas/Sender"
+        category:
+          type: string
+          enum: [general, announcement, reward, compensation, event]
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 120
+        body:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        expiresAt:
+          type: ["string", "null"]
+          format: date-time
+        attachments:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/Attachment"
+        metadata:
+          type: object
+          description: At most 2 KiB and nesting depth 8. Must not use reserved message field names.
+    Message:
+      allOf:
+        - $ref: "#/components/schemas/MessageInput"
+        - type: object
+          additionalProperties: false
+          required: [schemaVersion, id, recipientId, state, createdAt, readAt, claimedAt]
+          properties:
+            schemaVersion:
+              type: integer
+              const: 1
+            id:
+              type: string
+              format: uuid
+            recipientId:
+              type: string
+            state:
+              type: string
+              enum: [unread, read, claim]
+            createdAt:
+              type: string
+              format: date-time
+            readAt:
+              type: ["string", "null"]
+              format: date-time
+            claimedAt:
+              type: ["string", "null"]
+              format: date-time
+    MessageList:
+      type: object
+      additionalProperties: false
+      required: [playerId, total, messages]
+      properties:
+        playerId:
+          type: string
+        total:
+          type: integer
+          minimum: 0
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+    BroadcastAccepted:
+      type: object
+      additionalProperties: false
+      required: [broadcastId, status]
+      properties:
+        broadcastId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending]
+    BroadcastStatus:
+      type: object
+      additionalProperties: false
+      required: [broadcastId, status, totalPlayers, processed, succeeded, failed, failure]
+      properties:
+        broadcastId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, processing, completed, completed_with_errors, failed]
+        totalPlayers:
+          type: ["integer", "null"]
+          minimum: 0
+        processed:
+          type: integer
+          minimum: 0
+        succeeded:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        failure:
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [code, message]
+              properties:
+                code:
+                  type: string
+                message:
+                  type: string

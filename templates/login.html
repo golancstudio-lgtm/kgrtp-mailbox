@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>King's Gambit Mailbox Administration</title>
+  <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body data-page="login" data-client-id="%%CLIENT_ID%%">
+  <main class="login-shell">
+    <section class="card login-card">
+      <p class="eyebrow">King's Gambit: Rise to Power</p>
+      <h1>King's Gambit Mailbox Administration</h1>
+      <p class="lede">Sign in with a Google account that has been allowlisted for this mailbox.</p>
+      %%ERROR_BLOCK%%
+      <div id="google-button" class="google-button"></div>
+      <p id="login-status" class="hint" aria-live="polite"></p>
+    </section>
+  </main>
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>

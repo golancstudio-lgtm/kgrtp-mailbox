@@ -1,0 +1,12 @@
+.git
+.gitignore
+target
+Plan.MD
+**/*.md
+!README.md
+*.pem
+*.key
+.env
+.env.*
+credentials.json
+service-account*.json

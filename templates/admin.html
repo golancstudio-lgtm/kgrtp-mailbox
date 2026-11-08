@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>King's Gambit — Mailbox Administration</title>
+  <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body data-page="admin" data-csrf="%%CSRF%%" data-account="%%ACCOUNT%%">
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">King's Gambit: Rise to Power</p>
+      <h1>King's Gambit — Mailbox Administration</h1>
+    </div>
+    <div class="account">
+      <span id="account-label"></span>
+      <button id="logout" type="button">Log out</button>
+    </div>
+  </header>
+  <main class="workspace">
+    <form id="composer" class="card composer" novalidate>
+      <fieldset>
+        <legend>Recipient</legend>
+        <div class="choice-row">
+          <label><input type="radio" name="mode" value="player" checked> Specific Player</label>
+          <label><input type="radio" name="mode" value="broadcast"> All Players</label>
+        </div>
+        <div id="player-fields">
+          <label for="player-id">Player ID</label>
+          <div class="inline">
+            <input id="player-id" name="playerId" autocomplete="off" required maxlength="128">
+            <button id="validate-player" type="button">Validate Player</button>
+          </div>
+          <p id="player-result" class="hint" aria-live="polite"></p>
+        </div>
+        <div id="broadcast-warning" class="banner warn" hidden>
+          This sends a separate message to every enabled registered player. Disabled accounts are skipped. Delivery continues in the background and is not finished when the request is accepted.
+          <label class="confirm"><input id="confirm-broadcast" type="checkbox"> I understand this is a global broadcast.</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Sender</legend>
+        <div class="split">
+          <div>
+            <label for="sender-type">Type</label>
+            <select id="sender-type">
+              <option value="admin" selected>Admin</option>
+              <option value="system">System</option>
+            </select>
+          </div>
+          <div>
+            <label for="display-name">Display name</label>
+            <input id="display-name" value="King's Gambit" maxlength="120">
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Message</legend>
+        <label for="category">Category</label>
+        <select id="category">
+          <option value="general" selected>General</option>
+          <option value="announcement">Announcement</option>
+          <option value="reward">Reward</option>
+          <option value="compensation">Compensation</option>
+          <option value="event">Event</option>
+        </select>
+        <label for="subject">Subject <span id="subject-count" class="count">0/120</span></label>
+        <input id="subject" maxlength="120" required>
+        <label for="body">Body <span id="body-count" class="count">0/5000</span></label>
+        <textarea id="body" maxlength="5000" rows="8" required></textarea>
+        <label for="expires">Expiration (optional, your local time)</label>
+        <input id="expires" type="datetime-local">
+      </fieldset>
+
+      <fieldset>
+        <legend>Attachments</legend>
+        <p class="hint">Currency and chess pieces only. The game grants rewards when the player claims the message. This service only stores the claim state.</p>
+        <div id="attachments"></div>
+        <button id="add-attachment" type="button">+ Add Attachment</button>
+      </fieldset>
+
+      <div class="actions">
+        <button id="submit" type="submit">Send Message</button>
+      </div>
+      <p id="form-error" class="banner error" role="alert" hidden></p>
+      <div id="result" class="banner ok" hidden></div>
+    </form>
+
+    <aside class="card preview">
+      <h2>Preview</h2>
+      <div id="readable" class="readable"></div>
+      <h3>JSON</h3>
+      <pre id="json-preview"></pre>
+    </aside>
+  </main>
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+service-account*.json
+*-secret*.json
+
+# Local task brief. The service repository is the implementation.
+Plan.MD
