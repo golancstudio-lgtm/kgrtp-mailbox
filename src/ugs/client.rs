@@ -1,23 +1,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use base64::Engine;
-use chrono::Utc;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
-use reqwest::{Client, Method, RequestBuilder, StatusCode};
-use serde::Deserialize;
+use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::Value;
-use tokio::sync::{Mutex, RwLock};
 
 use crate::config::Config;
 use crate::ugs::authentication::basic_authorization_header;
-
-const TOKEN_EXCHANGE_URL: &str = "https://services.api.unity.com/auth/v2/token-exchange";
-const CLOUD_SAVE_SCOPES: &[&str] = &[
-    "cloud_save.data.read",
-    "cloud_save.data.upsert",
-    "cloud_save.data.delete",
-];
 
 #[derive(Debug, Clone, Copy)]
 pub enum CallMode {
@@ -63,13 +52,8 @@ struct UgsInner {
     project_id: String,
     environment_id: String,
     basic_auth: HeaderValue,
-    token: RwLock<Option<CachedToken>>,
-    token_refresh: Mutex<()>,
-}
-
-struct CachedToken {
-    value: String,
-    refresh_at: Instant,
+    key_id: String,
+    secret: String,
 }
 
 impl UgsClient {
@@ -78,8 +62,10 @@ impl UgsClient {
             &config.ugs_service_account_key_id,
             &config.ugs_service_account_secret,
         );
-        let basic_auth = HeaderValue::from_str(&basic)
-            .map_err(|_| "UGS_SERVICE_ACCOUNT_KEY_ID or UGS_SERVICE_ACCOUNT_SECRET is not a valid header value".to_owned())?;
+        let basic_auth = HeaderValue::from_str(&basic).map_err(|_| {
+            "UGS_SERVICE_ACCOUNT_KEY_ID or UGS_SERVICE_ACCOUNT_SECRET is not a valid header value"
+                .to_owned()
+        })?;
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
@@ -94,8 +80,8 @@ impl UgsClient {
                 project_id: config.ugs_project_id.clone(),
                 environment_id: config.ugs_environment_id.clone(),
                 basic_auth,
-                token: RwLock::new(None),
-                token_refresh: Mutex::new(()),
+                key_id: config.ugs_service_account_key_id.clone(),
+                secret: config.ugs_service_account_secret.clone(),
             }),
         })
     }
@@ -128,12 +114,13 @@ impl UgsClient {
         idempotent: bool,
         build: impl Fn() -> RequestBuilder,
     ) -> Result<Vec<u8>, UgsError> {
-        let mut auth_retry = false;
         let mut attempt = 0u32;
         loop {
-            let authorization = self.authorization(kind).await?;
             let started = Instant::now();
-            let response = build().header(AUTHORIZATION, authorization).send().await;
+            let response = build()
+                .header(AUTHORIZATION, self.authorization(kind))
+                .send()
+                .await;
             match response {
                 Err(error) if error.is_timeout() => {
                     if idempotent && attempt < 2 {
@@ -160,16 +147,17 @@ impl UgsClient {
                     let bytes = response.bytes().await.unwrap_or_default();
                     let elapsed = started.elapsed().as_millis() as u64;
                     if status.is_success() {
-                        tracing::debug!(operation, status = status.as_u16(), elapsed_ms = elapsed, "ugs request");
+                        tracing::debug!(
+                            operation,
+                            status = status.as_u16(),
+                            elapsed_ms = elapsed,
+                            "ugs request"
+                        );
                         return Ok(bytes.to_vec());
-                    }
-                    if status == StatusCode::UNAUTHORIZED && matches!(kind, AuthKind::CloudSave) && !auth_retry {
-                        auth_retry = true;
-                        self.invalidate_token().await;
-                        continue;
                     }
                     let body = String::from_utf8_lossy(&bytes);
                     let classified = classify(status, &body, retry_after);
+                    let problem = unity_problem(&body, &self.inner.key_id, &self.inner.secret);
                     let retryable = matches!(
                         classified,
                         UgsError::RateLimited { .. } | UgsError::Unavailable
@@ -194,6 +182,9 @@ impl UgsClient {
                     tracing::warn!(
                         operation,
                         status = status.as_u16(),
+                        unity_code = problem.code.as_deref().unwrap_or(""),
+                        unity_title = problem.title.as_deref().unwrap_or(""),
+                        unity_detail = problem.detail.as_deref().unwrap_or(""),
                         elapsed_ms = elapsed,
                         "ugs request failed"
                     );
@@ -203,105 +194,65 @@ impl UgsClient {
         }
     }
 
-    async fn authorization(&self, kind: AuthKind) -> Result<HeaderValue, UgsError> {
-        match kind {
-            AuthKind::PlayerAuth => Ok(self.inner.basic_auth.clone()),
-            AuthKind::CloudSave => {
-                let token = self.cloud_save_token().await?;
-                HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| UgsError::AuthRejected)
-            }
-        }
-    }
-
-    async fn cloud_save_token(&self) -> Result<String, UgsError> {
-        if let Some(token) = self.fresh_token().await {
-            return Ok(token);
-        }
-        let _guard = self.inner.token_refresh.lock().await;
-        if let Some(token) = self.fresh_token().await {
-            return Ok(token);
-        }
-        self.exchange_token().await
-    }
-
-    async fn fresh_token(&self) -> Option<String> {
-        let guard = self.inner.token.read().await;
-        guard.as_ref().and_then(|cached| {
-            if Instant::now() < cached.refresh_at {
-                Some(cached.value.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    async fn invalidate_token(&self) {
-        *self.inner.token.write().await = None;
-    }
-
-    async fn exchange_token(&self) -> Result<String, UgsError> {
-        let url = format!(
-            "{TOKEN_EXCHANGE_URL}?projectId={}&environmentId={}",
-            self.inner.project_id, self.inner.environment_id
-        );
-        let scoped = serde_json::json!({ "scopes": CLOUD_SAVE_SCOPES });
-        let first = self.exchange_once(url.clone(), Some(scoped)).await;
-        let token = match first {
-            Ok(token) => token,
-            Err(UgsError::BadRequest) => self.exchange_once(url, None).await?,
-            Err(error) => return Err(error),
-        };
-        let refresh_at = jwt_expiry(&token)
-            .map(|exp| {
-                let now = Utc::now().timestamp();
-                let seconds = (exp - now - 300).max(60) as u64;
-                Instant::now() + Duration::from_secs(seconds)
-            })
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(50 * 60));
-        *self.inner.token.write().await = Some(CachedToken {
-            value: token.clone(),
-            refresh_at,
-        });
-        Ok(token)
-    }
-
-    async fn exchange_once(&self, url: String, body: Option<Value>) -> Result<String, UgsError> {
-        let mut request = self
-            .inner
-            .http
-            .request(Method::POST, url)
-            .header(AUTHORIZATION, self.inner.basic_auth.clone());
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        let response = request.send().await.map_err(|error| {
-            if error.is_timeout() {
-                UgsError::Timeout
-            } else {
-                UgsError::Unavailable
-            }
-        })?;
-        let status = response.status();
-        let bytes = response.bytes().await.unwrap_or_default();
-        if !status.is_success() {
-            let text = String::from_utf8_lossy(&bytes);
-            return Err(classify(status, &text, None));
-        }
-        let parsed: TokenResponse = serde_json::from_slice(&bytes).map_err(|_| UgsError::BadResponse)?;
-        let token = parsed.access_token.or(parsed.access_token_snake).ok_or(UgsError::BadResponse)?;
-        if token.is_empty() {
-            return Err(UgsError::BadResponse);
-        }
-        Ok(token)
+    /// Cloud Save Data Admin and Player Authentication Admin both use HTTP Basic.
+    /// The stateless Bearer token is for the player Cloud Save host, not these admin routes.
+    fn authorization(&self, _kind: AuthKind) -> HeaderValue {
+        self.inner.basic_auth.clone()
     }
 }
 
-#[derive(Deserialize)]
-struct TokenResponse {
-    #[serde(rename = "accessToken")]
-    access_token: Option<String>,
-    #[serde(rename = "access_token")]
-    access_token_snake: Option<String>,
+struct UnityProblem {
+    code: Option<String>,
+    title: Option<String>,
+    detail: Option<String>,
+}
+
+fn unity_problem(body: &str, key_id: &str, secret: &str) -> UnityProblem {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return UnityProblem {
+            code: None,
+            title: None,
+            detail: None,
+        };
+    };
+    UnityProblem {
+        code: value.get("code").and_then(json_scalar).and_then(|text| sanitize(&text, key_id, secret)),
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .and_then(|text| sanitize(text, key_id, secret)),
+        detail: value
+            .get("detail")
+            .and_then(Value::as_str)
+            .and_then(|text| sanitize(text, key_id, secret)),
+    }
+}
+
+fn json_scalar(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn sanitize(value: &str, key_id: &str, secret: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("bearer")
+        || lower.contains("basic")
+        || lower.contains("authorization")
+        || (!key_id.is_empty() && value.contains(key_id))
+        || (!secret.is_empty() && value.contains(secret))
+    {
+        return None;
+    }
+    let mut characters = value.chars();
+    let short: String = characters.by_ref().take(180).collect();
+    if characters.next().is_some() {
+        Some(format!("{short}..."))
+    } else {
+        Some(short)
+    }
 }
 
 fn classify(status: StatusCode, body: &str, retry_after: Option<u64>) -> UgsError {
@@ -312,15 +263,20 @@ fn classify(status: StatusCode, body: &str, retry_after: Option<u64>) -> UgsErro
         StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => UgsError::Conflict,
         StatusCode::TOO_MANY_REQUESTS => UgsError::RateLimited { retry_after },
         StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => UgsError::Timeout,
-        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::INTERNAL_SERVER_ERROR => {
-            UgsError::Unavailable
-        }
+        StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::INTERNAL_SERVER_ERROR => UgsError::Unavailable,
         StatusCode::BAD_REQUEST => {
             let storage = (lower.contains("key") || lower.contains("item"))
-                && (lower.contains("limit") || lower.contains("maximum") || lower.contains("exceed"));
+                && (lower.contains("limit")
+                    || lower.contains("maximum")
+                    || lower.contains("exceed"));
             if storage {
                 UgsError::StorageLimit
-            } else if lower.contains("writelock") || lower.contains("write lock") || lower.contains("conflict") {
+            } else if lower.contains("writelock")
+                || lower.contains("write lock")
+                || lower.contains("conflict")
+            {
                 UgsError::Conflict
             } else {
                 UgsError::BadRequest
@@ -341,16 +297,6 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
-fn jwt_expiry(token: &str) -> Option<i64> {
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
-        .ok()?;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
-    value.get("exp")?.as_i64()
-}
-
 pub fn map_transport(error: UgsError) -> crate::models::AppError {
     match error {
         UgsError::AuthRejected => crate::models::AppError::ugs_auth(),
@@ -360,9 +306,9 @@ pub fn map_transport(error: UgsError) -> crate::models::AppError {
         UgsError::BadRequest => crate::models::AppError::bad_gateway(),
         UgsError::RateLimited { retry_after } => crate::models::AppError::rate_limited(retry_after),
         UgsError::Timeout => crate::models::AppError::ugs_timeout(),
-        UgsError::Unavailable => crate::models::AppError::ugs_unavailable(
-            "Unity Gaming Services is unavailable.",
-        ),
+        UgsError::Unavailable => {
+            crate::models::AppError::ugs_unavailable("Unity Gaming Services is unavailable.")
+        }
         UgsError::BadResponse => crate::models::AppError::bad_gateway(),
     }
 }

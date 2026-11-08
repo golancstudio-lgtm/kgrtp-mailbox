@@ -11,23 +11,19 @@ Unity game  --Bearer MAILBOX_API_TOKEN-->  Axum on Cloud Run
 Admin page  --Google session cookie----->  same process
                                               |
                                               +--> Player Auth Admin (HTTP Basic)
-                                              +--> Cloud Save Admin (stateless Bearer token)
+                                              +--> Cloud Save Data Admin (HTTP Basic)
 ```
 
 - Each message is one Protected Player Data key: `mail_<message-uuid>`.
 - Broadcast progress and idempotency records live in Cloud Save **private custom data**, not in a player's mailbox.
-- The process is stateless apart from short-lived token and Google certificate caches. Cloud Run can run more than one instance.
+- The process is stateless apart from a Google certificate cache. Cloud Run can run more than one instance.
 - `GET /health` does not call Unity.
 
-Cloud Save admin calls exchange the service account for a stateless token:
+Cloud Save Data Admin and Player Authentication Admin both use the same service-account header, `Authorization: Basic base64(keyId:secret)`, against `https://services.api.unity.com`. The stateless Bearer token from `/auth/v2/token-exchange` is for the player Cloud Save host (`cloud-save.services.api.unity.com`), not these admin routes. Sending it to the Data Admin API returns HTTP 401. `MAILBOX_API_TOKEN` is never sent to Unity.
 
-`POST https://services.api.unity.com/auth/v2/token-exchange?projectId=...&environmentId=...`
+Cloud Save data is addressed with `UGS_PROJECT_ID` and `UGS_ENVIRONMENT_ID`. There is no fallback environment.
 
-The current Unity admin authentication guide lists Cloud Save as requiring that token. The OpenAPI samples still show HTTP Basic. This service follows the authentication guide and sends `Authorization: Bearer <accessToken>` to Cloud Save. Player Authentication Admin is not on that stateless-token list, so those calls use HTTP Basic with the same key ID and secret. `MAILBOX_API_TOKEN` is never sent to Unity.
-
-The token is scoped to `UGS_PROJECT_ID` and `UGS_ENVIRONMENT_ID`. There is no fallback environment.
-
-`UGS_ORGANIZATION_ID` is required and checked at startup. Current Cloud Save and Player Auth admin URLs do not include the organization id; the stateless token is project- and environment-scoped instead.
+`UGS_ORGANIZATION_ID` is required and checked at startup. Current Cloud Save and Player Auth admin URLs do not include the organization id.
 
 ## Unity permissions
 
@@ -302,7 +298,7 @@ PUBLIC_BASE_URL=
 | `PORT` | No. Default `8080` | HTTP port. Cloud Run sets this | Cloud Run |
 | `RUST_LOG` | No. Default `info` | `tracing` filter | Operator choice |
 | `UGS_ORGANIZATION_ID` | Yes | Organization the credentials belong to. Validated, not placed in the current admin URLs | Unity Dashboard → Organization |
-| `UGS_PROJECT_ID` | Yes | Unity project. Used in every admin URL and in token exchange | Unity Dashboard → Project settings |
+| `UGS_PROJECT_ID` | Yes | Unity project. Used in every admin URL | Unity Dashboard → Project settings |
 | `UGS_ENVIRONMENT_ID` | Yes | Cloud Save environment. No fallback | Unity Dashboard → Environments |
 | `UGS_SERVICE_ACCOUNT_KEY_ID` | Yes | Service account key id | Unity Dashboard → Administration → Service Accounts → Keys |
 | `UGS_SERVICE_ACCOUNT_SECRET` | Yes | Service account secret. Shown once when the key is created | Same key dialog |
