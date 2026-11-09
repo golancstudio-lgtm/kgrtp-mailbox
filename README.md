@@ -254,7 +254,7 @@ Unity's published limits that this pacing is built around:
 - Cloud Save admin: 60 requests per second and 1000 requests per 30 minutes per project per IP.
 - Player Auth admin: 10 requests per second and 500 requests per 30 minutes.
 
-Broadcast delivery waits about 5 seconds per player, and player-list pages after the first wait 4 seconds. A large broadcast takes a long time and can consume the project's admin quota, which also serves live mailbox traffic. `429` pauses the job using `Retry-After` instead of marking those players failed. Five consecutive Unity outages fail the job. Confirmed writes are kept.
+Broadcast delivery waits about 1 second per player, and player-list pages after the first wait 1 second. Each player costs two Cloud Save calls, so a long broadcast can reach Unity's 1000 Cloud Save requests per 30 minutes. That limit also serves live mailbox traffic. `429` pauses the job using `Retry-After` instead of marking those players failed. Five consecutive Unity outages fail the job. Confirmed writes are kept.
 
 The worker runs inside the Cloud Run service. No Cloud Tasks queue and no Cloud Run Job is required. Progress is durable in Cloud Save. A second instance will not take a job whose lease is still valid. If the lease expires, the next status poll or worker pass continues from the cursor. One status request resumes at most one stalled batch.
 

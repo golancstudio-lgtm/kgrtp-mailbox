@@ -23,7 +23,8 @@ use crate::validation::{is_safe_id, validate_message_input};
 const BROADCAST_NAMESPACE: Uuid = Uuid::from_u128(0x6f1b9c3e8a4d4e2b9c1f7a2d5e8b0c44);
 const ACTIVE_INDEX_KEY: &str = "active-index";
 const WORKER_BATCH: usize = 8;
-const PLAYER_INTERVAL: Duration = Duration::from_secs(5);
+const PLAYER_INTERVAL: Duration = Duration::from_secs(1);
+const PAGE_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_STORED_FAILURES: usize = 500;
 const MAX_PLAYER_PAGES: u32 = 100_000;
 
@@ -422,7 +423,7 @@ impl BroadcastService {
             ));
         }
         if job.pages_read > 0 {
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            tokio::time::sleep(PAGE_INTERVAL).await;
         }
         let page = match self
             .inner
