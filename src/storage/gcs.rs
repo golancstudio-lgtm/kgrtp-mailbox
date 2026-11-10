@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::{Client, StatusCode};
@@ -229,6 +230,7 @@ impl MailboxStore {
             Some(lock) => Some(require_generation(lock)?),
             None => None,
         };
+        let custom_time = message_custom_time(object, value);
         let response = self
             .dispatch(|| {
                 let mut request = self
@@ -238,6 +240,9 @@ impl MailboxStore {
                     .header("content-type", "application/json");
                 if let Some(lock) = &lock {
                     request = request.header("x-goog-if-generation-match", lock);
+                }
+                if let Some(custom_time) = &custom_time {
+                    request = request.header("x-goog-custom-time", custom_time);
                 }
                 request.body(body.clone())
             })
@@ -527,6 +532,18 @@ async fn service_account_token(http: &Client, file: &AdcFile) -> Result<FreshTok
         value: body.access_token,
         expires_in: body.expires_in.unwrap_or(3600),
     })
+}
+
+fn message_custom_time(object: &str, value: &Value) -> Option<String> {
+    if !object.starts_with("players/") {
+        return None;
+    }
+    let text = value.get("expiresAt")?.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let parsed = DateTime::parse_from_rfc3339(text).ok()?;
+    Some(parsed.with_timezone(&Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 fn player_object(player_id: &str, key: &str) -> Result<String, UgsError> {

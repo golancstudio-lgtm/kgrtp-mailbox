@@ -331,7 +331,7 @@ Local HTTP is only for `PUBLIC_BASE_URL` of `http://localhost` or `http://127.0.
 - Deletes send the object generation. A concurrent claim is re-read before the delete is allowed.
 - Logs include request id, method, path, status, and duration. They do not include bodies, tokens, or secrets.
 - Corrupt message objects fail the mailbox read with `502` and are left in place.
-- Messages already stored in Cloud Save are not copied into the bucket. New sends and broadcasts write only to `MAILBOX_BUCKET`.
+- Messages with an `expiresAt` value are deleted by the bucket after that time. The service stores the same instant as the object's custom time, and the lifecycle rule deletes `players/` objects once that time has passed. Empty `expiresAt` means the message is kept. Jobs and idempotency records are not covered by the rule. Lifecycle runs about once a day, and the bucket's 7-day soft delete still applies after that.
 - Player accounts are project-scoped. The game reads mail through this API, not through Cloud Save.
 
 Automated tests, `cargo test`, clippy, a release build, Docker build, and Cloud Run deployment were not run as part of the implementation. `cargo check` was used only to make the crate compile. Verify the service after you deploy it.
