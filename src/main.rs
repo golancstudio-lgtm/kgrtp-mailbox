@@ -36,6 +36,7 @@ async fn main() {
     };
     tracing::info!(
         port = state.config.port,
+        mailbox_bucket = %state.config.mailbox_bucket,
         project_id = %state.config.ugs_project_id,
         environment_id = %state.config.ugs_environment_id,
         organization_configured = !state.config.ugs_organization_id.is_empty(),

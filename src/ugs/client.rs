@@ -16,7 +16,6 @@ pub enum CallMode {
 
 #[derive(Debug, Clone, Copy)]
 pub enum AuthKind {
-    CloudSave,
     PlayerAuth,
 }
 
@@ -50,7 +49,6 @@ pub struct UgsClient {
 struct UgsInner {
     http: Client,
     project_id: String,
-    environment_id: String,
     basic_auth: HeaderValue,
     key_id: String,
     secret: String,
@@ -78,7 +76,6 @@ impl UgsClient {
             inner: Arc::new(UgsInner {
                 http,
                 project_id: config.ugs_project_id.clone(),
-                environment_id: config.ugs_environment_id.clone(),
                 basic_auth,
                 key_id: config.ugs_service_account_key_id.clone(),
                 secret: config.ugs_service_account_secret.clone(),
@@ -92,18 +89,6 @@ impl UgsClient {
 
     pub fn project_id(&self) -> &str {
         &self.inner.project_id
-    }
-
-    pub fn environment_id(&self) -> &str {
-        &self.inner.environment_id
-    }
-
-    pub fn cloud_save_root(&self) -> String {
-        format!(
-            "https://services.api.unity.com/cloud-save/v1/data/projects/{}/environments/{}",
-            self.project_id(),
-            self.environment_id()
-        )
     }
 
     pub async fn dispatch(

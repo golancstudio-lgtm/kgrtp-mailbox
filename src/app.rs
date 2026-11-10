@@ -10,14 +10,14 @@ use crate::api::{api_router, health, normalize_statuses, not_found, request_cont
 use crate::config::Config;
 use crate::services::{BroadcastService, MailboxService, PlayerValidation};
 use crate::state::AppState;
-use crate::storage::CloudSave;
+use crate::storage::MailboxStore;
 use crate::ugs::{PlayerAuth, UgsClient};
 use crate::validation::MAX_BODY_BYTES;
 
 pub fn build_state(config: Config) -> Result<AppState, String> {
     let ugs = UgsClient::new(&config)?;
     let http = ugs.http().clone();
-    let cloud = CloudSave::new(ugs.clone());
+    let cloud = MailboxStore::new(&config.mailbox_bucket)?;
     let players = PlayerAuth::new(ugs);
     let validation = PlayerValidation::new(players.clone());
     let mailbox = MailboxService::new(cloud.clone(), validation.clone());

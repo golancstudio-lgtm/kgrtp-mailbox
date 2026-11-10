@@ -6,7 +6,7 @@ use crate::models::time;
 use crate::models::{AppError, Message, Transition};
 use crate::models::MessageInput;
 use crate::services::player_validation::PlayerValidation;
-use crate::storage::{CloudSave, StoredItem, IDEMPOTENCY_CUSTOM_ID, MAIL_PREFIX};
+use crate::storage::{MailboxStore, StoredItem, IDEMPOTENCY_CUSTOM_ID, MAIL_PREFIX};
 use crate::ugs::{map_transport, CallMode, UgsError};
 use crate::util::sha256_hex;
 use crate::validation::{validate_idempotency_key, validate_message_input, validate_player_id};
@@ -27,12 +27,12 @@ pub enum PreparedDelivery {
 
 #[derive(Clone)]
 pub struct MailboxService {
-    cloud: CloudSave,
+    cloud: MailboxStore,
     players: PlayerValidation,
 }
 
 impl MailboxService {
-    pub fn new(cloud: CloudSave, players: PlayerValidation) -> Self {
+    pub fn new(cloud: MailboxStore, players: PlayerValidation) -> Self {
         Self { cloud, players }
     }
 
@@ -391,7 +391,7 @@ fn map_idempotency_storage(error: UgsError) -> AppError {
     match error {
         UgsError::StorageLimit => AppError::conflict(
             "STORAGE_LIMIT_REACHED",
-            "The mailbox idempotency store has reached Unity's Cloud Save key limit.",
+            "The mailbox idempotency store rejected the record.",
         ),
         other => map_transport(other),
     }

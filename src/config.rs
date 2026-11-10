@@ -4,6 +4,7 @@ use std::fmt;
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
+    pub mailbox_bucket: String,
     pub ugs_organization_id: String,
     pub ugs_project_id: String,
     pub ugs_environment_id: String,
@@ -24,6 +25,7 @@ impl fmt::Debug for Config {
         formatter
             .debug_struct("Config")
             .field("port", &self.port)
+            .field("mailbox_bucket", &self.mailbox_bucket)
             .field("ugs_project_id", &self.ugs_project_id)
             .field("ugs_environment_id", &self.ugs_environment_id)
             .field("public_base_url", &self.public_base_url)
@@ -82,6 +84,7 @@ impl Config {
             Err(_) => 8080,
         };
 
+        let mailbox_bucket = required("MAILBOX_BUCKET", &mut missing);
         let ugs_organization_id = required("UGS_ORGANIZATION_ID", &mut missing);
         let ugs_project_id = required("UGS_PROJECT_ID", &mut missing);
         let ugs_environment_id = required("UGS_ENVIRONMENT_ID", &mut missing);
@@ -93,6 +96,11 @@ impl Config {
         let admin_session_secret = required("ADMIN_SESSION_SECRET", &mut missing);
         let public_base_url_raw = required("PUBLIC_BASE_URL", &mut missing);
 
+        if !mailbox_bucket.is_empty() && !is_bucket_name(&mailbox_bucket) {
+            invalid.push(
+                "MAILBOX_BUCKET (expected a Cloud Storage bucket name)".to_owned(),
+            );
+        }
         if !ugs_organization_id.is_empty() && !is_unity_id(&ugs_organization_id) {
             invalid.push("UGS_ORGANIZATION_ID (expected an identifier without spaces)".to_owned());
         }
@@ -191,6 +199,7 @@ impl Config {
 
         Ok(Self {
             port,
+            mailbox_bucket,
             ugs_organization_id,
             ugs_project_id,
             ugs_environment_id,
@@ -234,6 +243,22 @@ fn optional_list(name: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn is_bucket_name(value: &str) -> bool {
+    let Some(first) = value.chars().next() else {
+        return false;
+    };
+    let Some(last) = value.chars().next_back() else {
+        return false;
+    };
+    (3..=63).contains(&value.len())
+        && first.is_ascii_alphanumeric()
+        && last.is_ascii_alphanumeric()
+        && !value.contains("..")
+        && value.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 fn is_unity_id(value: &str) -> bool {

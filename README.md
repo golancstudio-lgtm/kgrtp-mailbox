@@ -10,20 +10,22 @@ The service stores messages and their read/claim state. **The Unity game grants 
 Unity game  --Bearer MAILBOX_API_TOKEN-->  Axum on Cloud Run
 Admin page  --Google session cookie----->  same process
                                               |
+                                              +--> Cloud Storage bucket (messages, jobs, idempotency)
                                               +--> Player Auth Admin (HTTP Basic)
-                                              +--> Cloud Save Data Admin (HTTP Basic)
 ```
 
-- Each message is one Protected Player Data key: `mail_<message-uuid>`.
-- Broadcast progress and idempotency records live in Cloud Save **private custom data**, not in a player's mailbox.
-- The process is stateless apart from a Google certificate cache. Cloud Run can run more than one instance.
-- `GET /health` does not call Unity.
+- Each message is one private object: `players/<player-id>/mail_<message-uuid>.json`.
+- Broadcast jobs are `jobs/bcast_<uuid>.json`. The active job list is `jobs/active-index.json`. Idempotency records are `idempotency/<key>.json`.
+- Object generation is the compare-and-swap token. A stale read cannot overwrite a newer claim or delete.
+- The bucket is private, in the same region as Cloud Run, with uniform access and public access prevention. The Cloud Run service account can read and write objects in that bucket only.
+- The process is stateless apart from a Google certificate cache and a short-lived storage access token. Cloud Run can run more than one instance.
+- `GET /health` does not call Unity or Cloud Storage.
 
-Cloud Save Data Admin and Player Authentication Admin both use the same service-account header, `Authorization: Basic base64(keyId:secret)`, against `https://services.api.unity.com`. The stateless Bearer token from `/auth/v2/token-exchange` is for the player Cloud Save host (`cloud-save.services.api.unity.com`), not these admin routes. Sending it to the Data Admin API returns HTTP 401. `MAILBOX_API_TOKEN` is never sent to Unity.
+Player Authentication Admin uses `Authorization: Basic base64(keyId:secret)` against `https://services.api.unity.com`. `MAILBOX_API_TOKEN` is never sent to Unity or to Google Cloud Storage.
 
-Cloud Save data is addressed with `UGS_PROJECT_ID` and `UGS_ENVIRONMENT_ID`. There is no fallback environment.
+Cloud Storage is addressed with `MAILBOX_BUCKET`. There is no fallback bucket. Player existence and broadcast recipient pages still use `UGS_PROJECT_ID`.
 
-`UGS_ORGANIZATION_ID` is required and checked at startup. Current Cloud Save and Player Auth admin URLs do not include the organization id.
+`UGS_ORGANIZATION_ID` is required and checked at startup. Player Auth admin URLs do not include the organization id.
 
 ## Unity permissions
 
@@ -31,17 +33,10 @@ Create a Unity service account key and grant a **project** role that includes on
 
 | Permission | Used for |
 |---|---|
-| `cloud_save.data.read` | Read protected player items and private custom items |
-| `cloud_save.data.upsert` | Create and update those items, with write locks |
-| `cloud_save.data.delete` | Delete one protected key |
 | `player_auth.users.get` | Prove a recipient exists |
 | `player_auth.users.list` | Page registered players for a broadcast |
 
-The Cloud Save admin guide describes **Cloud Save Viewer** for read and **Cloud Save Editor** for write. Confirm the assigned role also includes `cloud_save.data.delete`. If it does not, add a custom role with the three Cloud Save permissions above.
-
-Do **not** grant player deletion, `player_auth.users.disable`, or any permission that deletes all Cloud Save data. This service never calls the delete-all endpoints.
-
-Protected data is server-writable and readable by that player. The game can read its mailbox with ordinary player credentials and cannot rewrite it.
+Do **not** grant player deletion or `player_auth.users.disable`. This service does not write Cloud Save. Mail is not readable with player Cloud Save credentials; the game reads it through this API.
 
 ## Data model
 
@@ -104,7 +99,7 @@ read   -> claim
 
 ### Delete
 
-`204` when the `mail_` key is deleted. `404` when it is missing. `409 UNCLAIMED_ATTACHMENTS` when attachments are present and `state` is not `claim`. Messages with no attachments, and claimed messages, can be deleted. The delete sends the Cloud Save write lock so a concurrent claim cannot be overwritten by a delete.
+`204` when the message object is deleted. `404` when it is missing. `409 UNCLAIMED_ATTACHMENTS` when attachments are present and `state` is not `claim`. Messages with no attachments, and claimed messages, can be deleted. The delete sends the object generation so a concurrent claim cannot be overwritten by a delete.
 
 ### Attachments
 
@@ -134,7 +129,7 @@ Missing or invalid credentials return `401` with code `INVALID_TOKEN`. The token
 
 JSON bodies are limited to 64 KiB and must use `Content-Type: application/json`.
 
-`POST` send and broadcast accept an optional `Idempotency-Key` header (1–128 visible ASCII characters). The same key and the same raw body return the original message or broadcast. A different body returns `409 IDEMPOTENCY_CONFLICT`. Cloud Save has no atomic create-if-absent, so two concurrent first uses of one key can race. A retried request after the idempotency record is durable returns the original resource. Send replay returns `200`; the first successful create returns `201`.
+`POST` send and broadcast accept an optional `Idempotency-Key` header (1–128 visible ASCII characters). The same key and the same raw body return the original message or broadcast. A different body returns `409 IDEMPOTENCY_CONFLICT`. Two concurrent first uses of one key can race. A retried request after the idempotency record is durable returns the original resource. Send replay returns `200`; the first successful create returns `201`.
 
 ### Routes
 
@@ -149,7 +144,7 @@ JSON bodies are limited to 64 KiB and must use `Content-Type: application/json`.
 | `POST` | `/api/v1/messages/broadcast` | `202` `{ "broadcastId", "status": "pending" }` |
 | `GET` | `/api/v1/messages/broadcast/{broadcastId}` | `200` counts. `totalPlayers` is `null` until every player page has been read |
 
-Player ids are 1–128 characters: letters, digits, `_`, and `-`. An empty mailbox for a real player is `{ "playerId", "total": 0, "messages": [] }`. A missing player is `404 PLAYER_NOT_FOUND`. A missing Cloud Save key is not treated as a missing player.
+Player ids are 1–128 characters: letters, digits, `_`, and `-`. An empty mailbox for a real player is `{ "playerId", "total": 0, "messages": [] }`. A missing player is `404 PLAYER_NOT_FOUND`. A missing message object is not treated as a missing player.
 
 ### curl
 
@@ -241,22 +236,21 @@ Google Cloud OAuth client setup:
 
 ## Broadcasts
 
-`POST /api/v1/messages/broadcast` writes a job to private custom data id `kgrtp-mailbox-jobs`, key `bcast_<uuid>`, returns `202`, and then delivers in the background.
+`POST /api/v1/messages/broadcast` writes a job object, returns `202`, and then delivers in the background.
 
-Each recipient gets a distinct message. The message id is UUID v5 over `v1:<broadcastId>:<playerId>` in namespace `6f1b9c3e-8a4d-4e2b-9c1f-7a2d5e8b0c44`, so a retry writes the same key. Before writing, the service reads that key and leaves an existing message unchanged. Cloud Save set-without-write-lock overwrites, so this is idempotent only when the stored body matches. It is not a database transaction.
+Each recipient gets a distinct message. The message id is UUID v5 over `v1:<broadcastId>:<playerId>` in namespace `6f1b9c3e-8a4d-4e2b-9c1f-7a2d5e8b0c44`, so a retry writes the same object. Before writing, the service reads that object and leaves an existing message unchanged. A write without the current generation overwrites, so this is idempotent only when the stored body matches. It is not a database transaction.
 
 Job state stores the player-list cursor, pending ids, counts, a lease, and up to 500 failure records. `totalPlayers` stays `null` until the player list has been fully read. Disabled players are omitted. `processed` is `succeeded + failed`. Status is `pending`, `processing`, `completed`, `completed_with_errors`, or `failed`. A failed job keeps the deliveries already confirmed.
 
 Counts can increase twice if Player Auth returns the same player on two pages. The mailbox key is still unique. Player Auth `404` on the list is treated as no players.
 
-Unity's published limits that this pacing is built around:
+Unity's published Player Auth admin limits that this pacing is built around:
 
-- Cloud Save admin: 60 requests per second and 1000 requests per 30 minutes per project per IP.
 - Player Auth admin: 10 requests per second and 500 requests per 30 minutes.
 
-Broadcast delivery waits about 1 second per player, and player-list pages after the first wait 1 second. Each player costs two Cloud Save calls, so a long broadcast can reach Unity's 1000 Cloud Save requests per 30 minutes. That limit also serves live mailbox traffic. `429` pauses the job using `Retry-After` instead of marking those players failed. Five consecutive Unity outages fail the job. Confirmed writes are kept.
+Broadcast delivery waits about 100 milliseconds between players. Player-list pages after the first wait 1 second, because those calls still go to Player Auth. `429` pauses the job using `Retry-After` instead of marking those players failed. Five consecutive Unity outages fail the job. Confirmed writes are kept.
 
-The worker runs inside the Cloud Run service. No Cloud Tasks queue and no Cloud Run Job is required. Progress is durable in Cloud Save. A second instance will not take a job whose lease is still valid. If the lease expires, the next status poll or worker pass continues from the cursor. One status request resumes at most one stalled batch.
+The worker runs inside the Cloud Run service. No Cloud Tasks queue and no Cloud Run Job is required. Progress is durable in the bucket. A second instance will not take a job whose lease is still valid. If the lease expires, the next status poll or worker pass continues from the cursor. One status request resumes at most one stalled batch.
 
 For unattended completion, set the Cloud Run service to:
 
@@ -265,7 +259,7 @@ For unattended completion, set the Cloud Run service to:
 
 With request-based CPU, work pauses while the instance is throttled and resumes when `/admin` or `GET /api/v1/messages/broadcast/{id}` is called. Scale-to-zero does the same until a new instance starts.
 
-Private custom data allows 2000 keys per custom id. Completed broadcast jobs and per-player idempotency records (`kgrtp-mailbox-idem`) are not deleted automatically. At the limit, new jobs or idempotency records return `409 STORAGE_LIMIT_REACHED`. Remove old keys in the Unity dashboard if you hit that limit. Player mailboxes have the same 2000-key protected-data cap; this service will not drop mail to free a slot.
+Private objects are not deleted automatically when a broadcast finishes. Old mail stays until the game deletes it.
 
 ## Configuration
 
@@ -274,6 +268,8 @@ Set these in **Cloud Run → Service → Containers → Variables & Secrets** be
 ```dotenv
 PORT=8080
 RUST_LOG=info
+
+MAILBOX_BUCKET=kings-gambit-rise-to-power-mailbox
 
 UGS_ORGANIZATION_ID=
 UGS_PROJECT_ID=
@@ -297,9 +293,10 @@ PUBLIC_BASE_URL=
 |---|---|---|---|
 | `PORT` | No. Default `8080` | HTTP port. Cloud Run sets this | Cloud Run |
 | `RUST_LOG` | No. Default `info` | `tracing` filter | Operator choice |
-| `UGS_ORGANIZATION_ID` | Yes | Organization the credentials belong to. Validated, not placed in the current admin URLs | Unity Dashboard → Organization |
-| `UGS_PROJECT_ID` | Yes | Unity project. Used in every admin URL | Unity Dashboard → Project settings |
-| `UGS_ENVIRONMENT_ID` | Yes | Cloud Save environment. No fallback | Unity Dashboard → Environments |
+| `MAILBOX_BUCKET` | Yes | Private Cloud Storage bucket for messages, jobs, and idempotency | The bucket created for this service |
+| `UGS_ORGANIZATION_ID` | Yes | Organization the Player Auth credentials belong to. Validated, not placed in the current admin URLs | Unity Dashboard → Organization |
+| `UGS_PROJECT_ID` | Yes | Unity project. Used for Player Auth | Unity Dashboard → Project settings |
+| `UGS_ENVIRONMENT_ID` | Yes | Unity environment for Player Auth. No fallback | Unity Dashboard → Environments |
 | `UGS_SERVICE_ACCOUNT_KEY_ID` | Yes | Service account key id | Unity Dashboard → Administration → Service Accounts → Keys |
 | `UGS_SERVICE_ACCOUNT_SECRET` | Yes | Service account secret. Shown once when the key is created | Same key dialog |
 | `MAILBOX_API_TOKEN` | Yes. At least 16 printable ASCII characters | Bearer token for `/api/v1` | Generate a random secret yourself |
@@ -319,8 +316,8 @@ Build and deployment stay in the Google Cloud console. This repository does not 
 1. Create the Unity service account and the permissions in the table above. Copy the key id and secret into a password manager.
 2. Create the Google OAuth web client and the administrator allowlist.
 3. In Cloud Run, create a service from a **GitHub repository**. Connect this `kgrtp-mailbox` repository when prompted. Choose branch `main` and **Dockerfile** as the build type. The Dockerfile is a multi-stage build; the final image runs as uid `10001` and listens on `PORT`.
-4. Open **Containers → Variables & Secrets** and enter every variable in the table. You can store the secrets as Secret Manager references there; the container still sees ordinary environment variables.
-5. Set CPU to **always allocated** and minimum instances to **1** if broadcasts must finish without someone polling status.
+4. Open **Containers → Variables & Secrets** and enter every variable in the table, including `MAILBOX_BUCKET`. You can store the secrets as Secret Manager references there; the container still sees ordinary environment variables. Grant the Cloud Run runtime service account `roles/storage.objectAdmin` on that bucket only.
+5. Use manual scaling with one instance, or CPU always allocated and minimum instances **1**, if broadcasts must finish without someone polling status.
 6. Set the request timeout high enough for a single mailbox call (the process uses about 20 seconds per Unity call). Broadcast work continues after `202`.
 7. Deploy. Open `https://<service>/admin` and sign in. `GET /health` should return `{ "status": "healthy" }` without Unity credentials being sufficient to prove Unity itself is up.
 
@@ -330,12 +327,11 @@ Local HTTP is only for `PUBLIC_BASE_URL` of `http://localhost` or `http://127.0.
 
 ## Operational notes
 
-- Read and claim reload on write-lock `409` and retry a few times. They do not ignore a conflict.
-- Deletes use the write lock. A concurrent claim is re-read before the delete is allowed.
-- Logs include request id, method, path, status, and duration. They do not include bodies or secrets.
-- Corrupt `mail_` values fail the mailbox read with `502` and are left in place.
-- Prefix filtering uses Cloud Save's `prefix=mail_` parameter. If Unity rejects that parameter, keys are filtered in the service.
-- Player accounts are project-scoped. Mail is stored only in `UGS_ENVIRONMENT_ID`. The game must read Protected Player Data in that same environment.
-- No PostgreSQL, Redis, Firestore, or separate frontend service is used.
+- Read and claim reload on generation conflict `409` and retry a few times. They do not ignore a conflict.
+- Deletes send the object generation. A concurrent claim is re-read before the delete is allowed.
+- Logs include request id, method, path, status, and duration. They do not include bodies, tokens, or secrets.
+- Corrupt message objects fail the mailbox read with `502` and are left in place.
+- Messages already stored in Cloud Save are not copied into the bucket. New sends and broadcasts write only to `MAILBOX_BUCKET`.
+- Player accounts are project-scoped. The game reads mail through this API, not through Cloud Save.
 
 Automated tests, `cargo test`, clippy, a release build, Docker build, and Cloud Run deployment were not run as part of the implementation. `cargo check` was used only to make the crate compile. Verify the service after you deploy it.

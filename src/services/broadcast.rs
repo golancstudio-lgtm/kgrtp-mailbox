@@ -15,7 +15,7 @@ use crate::models::{
 };
 use crate::services::mailbox::{MailboxService, PreparedDelivery};
 use crate::services::player_validation::PlayerValidation;
-use crate::storage::{CloudSave, JOBS_CUSTOM_ID};
+use crate::storage::{MailboxStore, JOBS_CUSTOM_ID};
 use crate::ugs::{map_transport, CallMode, PlayerAuth, UgsError};
 use crate::util::sha256_hex;
 use crate::validation::{is_safe_id, validate_message_input};
@@ -23,7 +23,7 @@ use crate::validation::{is_safe_id, validate_message_input};
 const BROADCAST_NAMESPACE: Uuid = Uuid::from_u128(0x6f1b9c3e8a4d4e2b9c1f7a2d5e8b0c44);
 const ACTIVE_INDEX_KEY: &str = "active-index";
 const WORKER_BATCH: usize = 8;
-const PLAYER_INTERVAL: Duration = Duration::from_secs(1);
+const PLAYER_INTERVAL: Duration = Duration::from_millis(100);
 const PAGE_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_STORED_FAILURES: usize = 500;
 const MAX_PLAYER_PAGES: u32 = 100_000;
@@ -40,7 +40,7 @@ pub struct BroadcastService {
 }
 
 struct Inner {
-    cloud: CloudSave,
+    cloud: MailboxStore,
     players: PlayerAuth,
     mailbox: MailboxService,
     validation: PlayerValidation,
@@ -109,7 +109,7 @@ enum BatchStop {
 
 impl BroadcastService {
     pub fn new(
-        cloud: CloudSave,
+        cloud: MailboxStore,
         players: PlayerAuth,
         mailbox: MailboxService,
         validation: PlayerValidation,
@@ -830,7 +830,7 @@ fn map_job_storage(error: UgsError) -> AppError {
     match error {
         UgsError::StorageLimit => AppError::conflict(
             "STORAGE_LIMIT_REACHED",
-            "Broadcast storage has reached Unity's Cloud Save custom-data key limit. No broadcast records were deleted.",
+            "Broadcast storage rejected the job record. No broadcast records were deleted.",
         ),
         UgsError::NotFound => AppError::broadcast_not_found(),
         other => map_transport(other),
