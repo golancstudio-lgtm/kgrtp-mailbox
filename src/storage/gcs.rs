@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::ugs::{CallMode, UgsError};
 
@@ -221,30 +222,28 @@ impl MailboxStore {
         write_lock: Option<&str>,
     ) -> Result<Option<String>, UgsError> {
         let body = serde_json::to_vec(value).map_err(|_| UgsError::BadResponse)?;
-        let url = format!(
-            "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=media&name={}",
-            encode(&self.inner.bucket),
-            encode(object)
-        );
         let lock = match write_lock {
             Some(lock) => Some(require_generation(lock)?),
             None => None,
         };
         let custom_time = message_custom_time(object, value);
+        let (boundary, payload) = multipart_upload(object, &body, custom_time.as_deref());
+        let url = format!(
+            "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=multipart{}",
+            encode(&self.inner.bucket),
+            match &lock {
+                Some(lock) => format!("&ifGenerationMatch={lock}"),
+                None => String::new(),
+            }
+        );
+        let content_type = format!("multipart/related; boundary={boundary}");
         let response = self
             .dispatch(|| {
-                let mut request = self
-                    .inner
+                self.inner
                     .http
                     .post(url.clone())
-                    .header("content-type", "application/json");
-                if let Some(lock) = &lock {
-                    request = request.header("x-goog-if-generation-match", lock);
-                }
-                if let Some(custom_time) = &custom_time {
-                    request = request.header("x-goog-custom-time", custom_time);
-                }
-                request.body(body.clone())
+                    .header("content-type", content_type.clone())
+                    .body(payload.clone())
             })
             .await?;
         expect_success(response.status)?;
@@ -544,6 +543,25 @@ fn message_custom_time(object: &str, value: &Value) -> Option<String> {
     }
     let parsed = DateTime::parse_from_rfc3339(text).ok()?;
     Some(parsed.with_timezone(&Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
+fn multipart_upload(object: &str, body: &[u8], custom_time: Option<&str>) -> (String, Vec<u8>) {
+    let boundary = format!("mailbox_{}", Uuid::new_v4().simple());
+    let mut metadata = serde_json::json!({
+        "name": object,
+        "contentType": "application/json",
+    });
+    if let Some(custom_time) = custom_time {
+        metadata["customTime"] = Value::String(custom_time.to_owned());
+    }
+    let metadata_text = metadata.to_string();
+    let mut payload = Vec::new();
+    payload.extend(
+        format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata_text}\r\n--{boundary}\r\nContent-Type: application/json\r\n\r\n").as_bytes(),
+    );
+    payload.extend(body);
+    payload.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (boundary, payload)
 }
 
 fn player_object(player_id: &str, key: &str) -> Result<String, UgsError> {
